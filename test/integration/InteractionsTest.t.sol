@@ -1,56 +1,62 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.18;
+pragma solidity 0.8.19;
 
-import {Test} from "forge-std/Test.sol";
-import {FundMe} from "../../src/FundMe.sol";
 import {DeployFundMe} from "../../script/DeployFundMe.s.sol";
 import {FundFundMe, WithdrawFundMe} from "../../script/Interactions.s.sol";
+import {FundMe} from "../../src/FundMe.sol";
+import {HelperConfig} from "../../script/HelperConfig.s.sol";
+import {Test, console} from "forge-std/Test.sol";
+import {StdCheats} from "forge-std/StdCheats.sol";
+import {ZkSyncChainChecker} from "lib/foundry-devops/src/ZkSyncChainChecker.sol";
 
-contract InteractionsTest is Test {
-    FundMe fundMe;
+contract InteractionsTest is ZkSyncChainChecker, StdCheats, Test {
+    FundMe public fundMe;
+    HelperConfig public helperConfig;
 
-    address USER = makeAddr("user");
-    uint256 constant SEND_VALUE = 0.1 ether;
-    uint256 constant STARTING_BALANCE = 10 ether;
-    uint256 constant GAS_PRICE = 1;
+    uint256 public constant SEND_VALUE = 0.1 ether; // just a value to make sure we are sending enough!
+    uint256 public constant STARTING_USER_BALANCE = 10 ether;
+    uint256 public constant GAS_PRICE = 1;
 
-    function setUp() external {
-        DeployFundMe deploy = new DeployFundMe();
-        fundMe = deploy.run();
-        vm.deal(USER, STARTING_BALANCE);
+    address public constant USER = address(1);
+
+    // uint256 public constant SEND_VALUE = 1e18;
+    // uint256 public constant SEND_VALUE = 1_000_000_000_000_000_000;
+    // uint256 public constant SEND_VALUE = 1000000000000000000;
+
+    function setUp() external skipZkSync {
+        if (!isZkSyncChain()) {
+            DeployFundMe deployer = new DeployFundMe();
+            (fundMe, helperConfig) = deployer.deployFundMe();
+        } else {
+            helperConfig = new HelperConfig();
+            fundMe = new FundMe(
+                helperConfig.getConfigByChainId(block.chainid).priceFeed
+            );
+        }
+        vm.deal(USER, STARTING_USER_BALANCE);
     }
 
-    function testUserCanFundInteractions() public {
-        FundFundMe fundFundMe = new FundFundMe();
-        vm.prank(USER);
-        vm.deal(USER, 1e18);
-        fundFundMe.fundFundMe(address(fundMe));
+    function testUserCanFundAndOwnerWithdraw() public skipZkSync {
+        uint256 preUserBalance = address(USER).balance;
+        uint256 preOwnerBalance = address(fundMe.getOwner()).balance;
+        uint256 originalFundMeBalance = address(fundMe).balance;
 
-        address funder = fundMe.getFunder(0);
-        assertEq(funder, USER);
-    }
-
-    function testUserCanWithDrawInteractions() public {
-        // First fund the contract
-        FundFundMe fundFundMe = new FundFundMe();
-
-        // Fund directly to avoid complications
+        // Using vm.prank to simulate funding from the USER address
         vm.prank(USER);
         fundMe.fund{value: SEND_VALUE}();
 
-        // Verify funding worked
-        assertEq(address(fundMe).balance, SEND_VALUE);
+        WithdrawFundMe withdrawFundMe = new WithdrawFundMe();
+        withdrawFundMe.withdrawFundMe(address(fundMe));
 
-        // Now test withdrawal
-        uint256 startingOwnerBalance = fundMe.getOwner().balance;
+        uint256 afterUserBalance = address(USER).balance;
+        uint256 afterOwnerBalance = address(fundMe.getOwner()).balance;
 
-        // Instead of using the script, withdraw directly
-        vm.prank(fundMe.getOwner());
-        fundMe.withdraw();
-
-        // Verify withdrawal worked
-        assertEq(address(fundMe).balance, 0);
-        assertEq(fundMe.getOwner().balance, startingOwnerBalance + SEND_VALUE);
+        assert(address(fundMe).balance == 0);
+        assertEq(afterUserBalance + SEND_VALUE, preUserBalance);
+        assertEq(
+            preOwnerBalance + SEND_VALUE + originalFundMeBalance,
+            afterOwnerBalance
+        );
     }
 }
